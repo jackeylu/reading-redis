@@ -2931,6 +2931,7 @@ void *IOThreadMain(void *myid) {
     redisSetCpuAffinity(server.server_cpulist);
 
     while(1) {
+         // 遍历线程 id 获取线程对应的待处理连接列表
         /* Wait for start */
         for (int j = 0; j < 1000000; j++) {
             if (io_threads_pending[id] != 0) break;
@@ -2954,6 +2955,7 @@ void *IOThreadMain(void *myid) {
         listRewind(io_threads_list[id],&li);
         while((ln = listNext(&li))) {
             client *c = listNodeValue(ln);
+            // 通过 io_threads_op 控制线程要处理的是读还是写请求
             if (io_threads_op == IO_THREADS_OP_WRITE) {
                 writeToClient(c,0);
             } else if (io_threads_op == IO_THREADS_OP_READ) {
@@ -3128,12 +3130,15 @@ int handleClientsWithPendingWritesUsingThreads(void) {
  * As a side effect of calling this function the client is put in the
  * pending read clients and flagged as such. */
 int postponeClientRead(client *c) {
-    if (server.io_threads_active &&
-        server.io_threads_do_reads &&
+    if (server.io_threads_active && // 多线程 IO 是否在开启状态，在待处理请求较少时会停止IO多线程
+        server.io_threads_do_reads &&  // 读是否开启多线程 IO
         !ProcessingEventsWhileBlocked &&
-        !(c->flags & (CLIENT_MASTER|CLIENT_SLAVE|CLIENT_PENDING_READ)))
+        !(c->flags & (CLIENT_MASTER|CLIENT_SLAVE|CLIENT_PENDING_READ))) // 主从库复制请求不使用多线程 IO
     {
+        // 连接标识为 CLIENT_PENDING_READ 来控制不会反复被加队列,
+        // 这个标识作用在后面会再次提到
         c->flags |= CLIENT_PENDING_READ;
+        // 连接加入到等待读处理队列
         listAddNodeHead(server.clients_pending_read,c);
         return 1;
     } else {
@@ -3159,6 +3164,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     listNode *ln;
     listRewind(server.clients_pending_read,&li);
     int item_id = 0;
+    // 将等待处理队列的连接按照 RR 的方式分配给多个 IO 线程
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         int target_id = item_id % server.io_threads_num;
@@ -3183,6 +3189,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     listEmpty(io_threads_list[0]);
 
     /* Wait for all the other threads to end their work. */
+    // 一直忙等待直到所有的连接请求都被 IO 线程处理完
     while(1) {
         unsigned long pending = 0;
         for (int j = 1; j < server.io_threads_num; j++)
